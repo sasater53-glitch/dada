@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace CityBiz.Game
 {
-    public enum PedNodeKind : byte { Walk, Door, BusStop, Idle }
+    public enum PedNodeKind : byte { Walk, Door, BusStop, Idle, Seat }
 
     /// <summary>
     /// Навигационный граф пешеходов (тротуары, переходы, дорожки сквера, входы в здания).
@@ -81,10 +81,20 @@ namespace CityBiz.Game
             for (int i = 0; i < Nodes.Count; i++)
             {
                 if (i == node || Kinds[i] != PedNodeKind.Walk || neighbors.Contains(i)) continue;
+                if (Mathf.Abs(Nodes[i].y - Nodes[node].y) > 1f) continue; // только свой этаж
                 float d = (Nodes[i] - Nodes[node]).sqrMagnitude;
                 if (d < bestD) { bestD = d; best = i; }
             }
             if (best >= 0) AddEdge(node, best);
+        }
+
+        /// <summary>«Сваривает» висячие концы линий с ближайшими узлами своего этажа.</summary>
+        public void Weld(float maxDistance = 6f)
+        {
+            var degree = new int[Nodes.Count];
+            for (int e = 0; e < EdgeA.Count; e++) { degree[EdgeA[e]]++; degree[EdgeB[e]]++; }
+            for (int i = 0; i < Nodes.Count; i++)
+                if (Kinds[i] == PedNodeKind.Walk && degree[i] <= 1) LinkToNearest(i, maxDistance);
         }
 
         public int Nearest(Vector3 p, PedNodeKind kind, int exclude = -1)

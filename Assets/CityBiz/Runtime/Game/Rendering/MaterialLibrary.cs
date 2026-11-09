@@ -6,24 +6,31 @@ namespace CityBiz.Game
 {
     /// <summary>
     /// Единая библиотека материалов. Работает и с URP (основной вариант), и со встроенным конвейером.
-    /// Материалы кешируются по ключу — одинаковые детали всегда используют один материал,
-    /// что даёт SRP Batcher / GPU Instancing максимальную эффективность.
+    /// Материалы кешируются по ключу — одинаковые детали используют один материал (SRP Batcher / GPU Instancing).
+    /// Поверхности ТЦ используют PBR-текстуры Poly Haven (CC0) из Resources/PolyHaven/Textures.
     /// </summary>
     public sealed class MaterialLibrary
     {
         static MaterialLibrary _instance;
         public static MaterialLibrary Instance => _instance ?? (_instance = new MaterialLibrary());
 
-        /// <summary>Сброс при выходе из Play Mode, чтобы не держать уничтоженные материалы.</summary>
-        public static void Reset() => _instance = null;
+        /// <summary>
+        /// Сброс при выходе из Play Mode, чтобы не держать уничтоженные материалы.
+        /// Материалы-ассеты запечённой сцены возвращаются к исходным значениям (ночь/погода меняют их во время игры).
+        /// </summary>
+        public static void Reset()
+        {
+            _instance?.RestoreAdopted();
+            _instance = null;
+        }
 
         readonly Dictionary<string, Material> _materials = new Dictionary<string, Material>();
         readonly Dictionary<string, Texture2D> _textures = new Dictionary<string, Texture2D>();
-        readonly Shader _lit, _particles;
+        readonly Shader _lit, _particles, _unlit;
         public readonly bool IsUrp;
 
-        string ColorProp => IsUrp ? "_BaseColor" : "_Color";
-        string TexProp => IsUrp ? "_BaseMap" : "_MainTex";
+        public string ColorProp => IsUrp ? "_BaseColor" : "_Color";
+        public string TexProp => IsUrp ? "_BaseMap" : "_MainTex";
         string SmoothProp => IsUrp ? "_Smoothness" : "_Glossiness";
 
         MaterialLibrary()
@@ -33,45 +40,59 @@ namespace CityBiz.Game
             if (_lit == null) { _lit = Shader.Find("Standard"); IsUrp = false; }
             _particles = IsUrp ? Shader.Find("Universal Render Pipeline/Particles/Unlit") : Shader.Find("Particles/Standard Unlit");
             if (_particles == null) _particles = Shader.Find("Legacy Shaders/Particles/Alpha Blended");
+            _unlit = IsUrp ? Shader.Find("Universal Render Pipeline/Unlit") : Shader.Find("Unlit/Texture");
         }
 
         public IEnumerable<KeyValuePair<string, Material>> AllMaterials => _materials;
 
-        /// <summary>Принять материал из запечённой сцены, чтобы переключение день/ночь меняло именно его.</summary>
+        readonly List<(Material live, Material snapshot)> _adopted = new List<(Material, Material)>();
+
         public void Adopt(string key, Material m)
         {
-            if (m != null) _materials[key] = m;
+            if (m == null) return;
+            _materials[key] = m;
+            foreach (var a in _adopted) if (a.live == m) return;
+            // Копия исходных значений: в редакторе изменения материала-ассета в Play Mode иначе сохранились бы на диск
+            _adopted.Add((m, new Material(m) { name = m.name + "_snapshot", hideFlags = HideFlags.HideAndDontSave }));
+        }
+
+        void RestoreAdopted()
+        {
+            foreach (var (live, snapshot) in _adopted)
+            {
+                if (live != null && snapshot != null) live.CopyPropertiesFromMaterial(snapshot);
+                if (snapshot != null) Object.DestroyImmediate(snapshot);
+            }
+            _adopted.Clear();
         }
 
         public bool TryGet(string key, out Material m) => _materials.TryGetValue(key, out m);
 
         // ---------------- Текстуры ----------------
 
-        public Texture2D Texture(string name)
+        /// <summary>Процедурные текстуры — только как запасной вариант, если ассет не найден.</summary>
+        public Texture2D Procedural(string name)
         {
-            if (_textures.TryGetValue(name, out var t)) return t;
+            if (_textures.TryGetValue("proc_" + name, out var t)) return t;
             switch (name)
             {
-                case "asphalt": t = ProceduralTextures.Asphalt(); break;
-                case "sidewalk": t = ProceduralTextures.SidewalkTiles(); break;
-                case "pavers": t = ProceduralTextures.Pavers(); break;
-                case "brick": t = ProceduralTextures.Brick(); break;
-                case "plaster": t = ProceduralTextures.Plaster(); break;
                 case "concrete": t = ProceduralTextures.Concrete(); break;
-                case "corrugated": t = ProceduralTextures.Corrugated(); break;
-                case "grass": t = ProceduralTextures.Grass(); break;
-                case "wood": t = ProceduralTextures.Wood(); break;
-                case "parquet": t = ProceduralTextures.Parquet(); break;
+                case "plaster": t = ProceduralTextures.Plaster(); break;
                 case "tiles": t = ProceduralTextures.FloorTiles(); break;
-                case "carpet": t = ProceduralTextures.Carpet(); break;
-                case "gravel": t = ProceduralTextures.RoofGravel(); break;
-                case "leaves": t = ProceduralTextures.Leaves(); break;
                 case "glass": t = ProceduralTextures.GlassReflection(); break;
-                case "litwindow": t = ProceduralTextures.LitWindow(); break;
-                case "windowband": t = ProceduralTextures.WindowBand(); break;
+                case "carpet": t = ProceduralTextures.Carpet(); break;
                 default: return null;
             }
-            _textures[name] = t;
+            _textures["proc_" + name] = t;
+            return t;
+        }
+
+        public Texture2D Load(string resourcePath)
+        {
+            if (string.IsNullOrEmpty(resourcePath)) return null;
+            if (_textures.TryGetValue(resourcePath, out var t)) return t;
+            t = Resources.Load<Texture2D>(resourcePath);
+            _textures[resourcePath] = t;
             return t;
         }
 
@@ -84,32 +105,46 @@ namespace CityBiz.Game
             return m;
         }
 
-        /// <summary>Непрозрачный PBR-материал. tile — размер повтора текстуры в метрах.</summary>
-        public Material Lit(string key, Color color, string texture = null, float tile = 1f, float smoothness = 0.15f, float metallic = 0f)
+        public Material Lit(string key, Color color, Texture2D albedo = null, float tile = 1f, float smoothness = 0.15f, float metallic = 0f, Texture2D normal = null, float normalScale = 1f)
         {
             if (_materials.TryGetValue(key, out var m)) return m;
             m = NewMaterial(key, _lit);
             m.SetColor(ColorProp, color);
             m.SetFloat(SmoothProp, smoothness);
             m.SetFloat("_Metallic", metallic);
-            if (texture != null)
+            if (albedo != null)
             {
-                var tex = Texture(texture);
-                m.SetTexture(TexProp, tex);
+                m.SetTexture(TexProp, albedo);
+                if (!IsUrp) m.SetTexture("_MainTex", albedo);
                 m.SetTextureScale(TexProp, new Vector2(1f / tile, 1f / tile));
+            }
+            if (normal != null)
+            {
+                m.SetTexture("_BumpMap", normal);
+                m.SetFloat("_BumpScale", normalScale);
+                m.EnableKeyword("_NORMALMAP");
             }
             return m;
         }
 
-        public Material Emissive(string key, Color baseColor, Color emission, string texture = null)
+        /// <summary>PBR-поверхность Poly Haven. tile — метров на повтор текстуры (UV мешей — в метрах).</summary>
+        public Material Surface(string polyHavenId, float tile, Color tint, float smoothness, float metallic = 0f)
+        {
+            string key = "ph_" + polyHavenId + "_" + tile + "_" + MaterialLibraryHex(tint);
+            if (_materials.TryGetValue(key, out var m)) return m;
+            var albedo = Load("PolyHaven/Textures/" + polyHavenId + "_diff");
+            var normal = Load("PolyHaven/Textures/" + polyHavenId + "_nor_gl");
+            if (albedo == null) albedo = Procedural("concrete");
+            return Lit(key, tint, albedo, tile, smoothness, metallic, normal);
+        }
+
+        static string MaterialLibraryHex(Color c) => ColorUtility.ToHtmlStringRGB(c);
+
+        public Material Emissive(string key, Color baseColor, Color emission, Texture2D texture = null)
         {
             if (_materials.TryGetValue(key, out var m)) return m;
             m = Lit(key, baseColor, texture, 1f, 0.5f);
-            if (texture != null)
-            {
-                m.SetTexture("_EmissionMap", Texture(texture));
-                m.SetTextureScale(TexProp, Vector2.one);
-            }
+            if (texture != null) m.SetTexture("_EmissionMap", texture);
             SetEmission(m, emission);
             return m;
         }
@@ -123,14 +158,8 @@ namespace CityBiz.Game
             m.SetColor("_EmissionColor", emission);
         }
 
-        /// <summary>Прозрачное стекло витрин.</summary>
-        public Material Glass(string key, Color tint, float smoothness = 0.95f)
+        public void MakeTransparent(Material m)
         {
-            if (_materials.TryGetValue(key, out var m)) return m;
-            m = NewMaterial(key, _lit);
-            m.SetColor(ColorProp, tint);
-            m.SetFloat(SmoothProp, smoothness);
-            m.SetFloat("_Metallic", 0.1f);
             if (IsUrp)
             {
                 m.SetFloat("_Surface", 1f);
@@ -156,6 +185,46 @@ namespace CityBiz.Game
                 m.SetOverrideTag("RenderType", "Transparent");
             }
             m.renderQueue = (int)RenderQueue.Transparent;
+        }
+
+        /// <summary>Альфа-срез (листья растений), двусторонний в URP.</summary>
+        public void MakeCutout(Material m)
+        {
+            if (IsUrp)
+            {
+                m.SetFloat("_AlphaClip", 1f);
+                m.SetFloat("_Cutoff", 0.45f);
+                m.SetFloat("_Cull", 0f);
+                m.EnableKeyword("_ALPHATEST_ON");
+            }
+            else
+            {
+                m.SetFloat("_Mode", 1f);
+                m.SetFloat("_Cutoff", 0.45f);
+                m.EnableKeyword("_ALPHATEST_ON");
+            }
+            m.SetOverrideTag("RenderType", "TransparentCutout");
+            m.renderQueue = (int)RenderQueue.AlphaTest;
+        }
+
+        public Material Glass(string key, Color tint, float smoothness = 0.95f)
+        {
+            if (_materials.TryGetValue(key, out var m)) return m;
+            m = NewMaterial(key, _lit);
+            m.SetColor(ColorProp, tint);
+            m.SetFloat(SmoothProp, smoothness);
+            m.SetFloat("_Metallic", 0.1f);
+            MakeTransparent(m);
+            return m;
+        }
+
+        public Material Unlit(string key, Color color, Texture2D tex = null)
+        {
+            if (_materials.TryGetValue(key, out var m)) return m;
+            m = NewMaterial(key, _unlit != null ? _unlit : _lit);
+            m.SetColor(ColorProp, color);
+            if (!IsUrp) m.color = color;
+            if (tex != null) m.SetTexture(TexProp, tex);
             return m;
         }
 
@@ -182,44 +251,49 @@ namespace CityBiz.Game
         public void SetColor(Material m, Color c) { if (m != null) m.SetColor(ColorProp, c); }
         public void SetSmoothness(Material m, float s) { if (m != null) m.SetFloat(SmoothProp, s); }
 
-        // ---------------- Палитра проекта ----------------
+        public Color GetColor(Material m)
+        {
+            if (m == null) return Color.white;
+            if (m.HasProperty("_BaseColor")) return m.GetColor("_BaseColor");
+            if (m.HasProperty("_Color")) return m.GetColor("_Color");
+            return Color.white;
+        }
+
+        public Texture GetAlbedo(Material m)
+        {
+            if (m == null) return null;
+            if (m.HasProperty("_BaseMap") && m.GetTexture("_BaseMap") != null) return m.GetTexture("_BaseMap");
+            if (m.HasProperty("_MainTex")) return m.GetTexture("_MainTex");
+            return null;
+        }
+
+        // ---------------- Палитра ТЦ ----------------
 
         public static string Hex(Color c) => ColorUtility.ToHtmlStringRGB(c);
 
-        public Material Asphalt => Lit("asphalt", new Color(0.36f, 0.36f, 0.38f), "asphalt", 6f, 0.12f);
-        public Material AsphaltParking => Lit("asphalt_parking", new Color(0.3f, 0.3f, 0.32f), "asphalt", 6f, 0.1f);
-        public Material Sidewalk => Lit("sidewalk", new Color(0.78f, 0.76f, 0.72f), "sidewalk", 2.4f, 0.1f);
-        public Material Pavers => Lit("pavers", new Color(0.75f, 0.62f, 0.52f), "pavers", 2f, 0.1f);
-        public Material Curb => Lit("curb", new Color(0.62f, 0.62f, 0.63f), "concrete", 2f, 0.2f);
-        public Material Grass => Lit("grass", new Color(0.36f, 0.55f, 0.24f), "grass", 4f, 0.05f);
-        public Material Soil => Lit("soil", new Color(0.3f, 0.22f, 0.16f), "gravel", 1.5f, 0.02f);
-        public Material RoadPaint => Lit("road_paint", new Color(0.92f, 0.92f, 0.88f), null, 1f, 0.3f);
-        public Material RoadPaintYellow => Lit("road_paint_y", new Color(0.95f, 0.75f, 0.15f), null, 1f, 0.3f);
-        public Material Roof => Lit("roof", new Color(0.42f, 0.42f, 0.44f), "gravel", 3f, 0.05f);
+        public Material MallFloor => Surface("marble_tiles", 2.5f, new Color(0.95f, 0.94f, 0.92f), 0.75f);
+        public Material WalkwayFloor => Surface("terrazzo_tiles", 2.2f, Color.white, 0.6f);
+        public Material FoodCourtFloor => Surface("large_grey_tiles", 2.5f, new Color(0.9f, 0.9f, 0.88f), 0.5f);
+        public Material Wall => Surface("white_plaster_02", 3f, new Color(0.95f, 0.94f, 0.92f), 0.1f);
+        public Material WallDark => Surface("white_plaster_02", 3f, new Color(0.25f, 0.27f, 0.3f), 0.15f);
+        public Material Ceiling => Surface("ceiling_interior", 3f, Color.white, 0.05f);
+        public Material ServiceFloor => Surface("concrete_floor_worn_001", 3f, new Color(0.85f, 0.85f, 0.83f), 0.2f);
+        public Material MetalPanel => Surface("metal_plate", 2f, new Color(0.75f, 0.77f, 0.8f), 0.6f, 0.8f);
+        public Material ColumnStone => Surface("marble_01", 2f, Color.white, 0.8f);
+        public Material Aluminium => Lit("aluminium", new Color(0.62f, 0.64f, 0.67f), null, 1f, 0.65f, 0.9f);
         public Material MetalDark => Lit("metal_dark", new Color(0.12f, 0.13f, 0.14f), null, 1f, 0.55f, 0.8f);
-        public Material Aluminium => Lit("aluminium", new Color(0.55f, 0.57f, 0.6f), null, 1f, 0.6f, 0.9f);
-        public Material TrimWhite => Lit("trim_white", new Color(0.92f, 0.9f, 0.86f), "plaster", 2f, 0.2f);
-        public Material WindowGlass => Lit("window_glass", new Color(0.32f, 0.4f, 0.48f), "glass", 1f, 0.95f, 0.4f);
-        public Material StoreGlass => Glass("store_glass", new Color(0.6f, 0.75f, 0.8f, 0.22f));
-        public Material WindowLit(int group) => Emissive("window_lit_" + group, new Color(0.9f, 0.8f, 0.6f), new Color(1.25f, 1.0f, 0.65f) * (0.75f + 0.2f * group), "litwindow");
-        public Material Wood => Lit("wood", new Color(0.55f, 0.38f, 0.24f), "wood", 1.5f, 0.35f);
-        public Material Dark => Lit("dark", new Color(0.08f, 0.08f, 0.09f), null, 1f, 0.3f);
-        public Material Concrete => Lit("concrete", new Color(0.66f, 0.65f, 0.63f), "concrete", 4f, 0.1f);
-        public Material Bark => Lit("bark", new Color(0.32f, 0.25f, 0.19f), "wood", 1f, 0.1f);
-        public Material Leaves(int i)
-        {
-            var colors = new[] { new Color(0.27f, 0.45f, 0.18f), new Color(0.33f, 0.5f, 0.2f), new Color(0.22f, 0.38f, 0.2f) };
-            return Lit("leaves_" + i, colors[i % colors.Length], "leaves", 2f, 0.05f);
-        }
-        public Material LampLens => Emissive("lamp_lens", new Color(0.95f, 0.9f, 0.8f), Color.black);
-        public Material SignLight => Emissive("sign_light", Color.white, new Color(1.6f, 1.55f, 1.4f));
-        public Material Headlight => Emissive("headlight", new Color(0.95f, 0.95f, 0.9f), Color.black);
-        public Material Taillight => Emissive("taillight", new Color(0.6f, 0.05f, 0.05f), new Color(0.4f, 0f, 0f));
-        public Material CarGlass => Lit("car_glass", new Color(0.12f, 0.15f, 0.18f), "glass", 2f, 0.95f, 0.3f);
-        public Material Tire => Lit("tire", new Color(0.07f, 0.07f, 0.07f), null, 1f, 0.15f);
+        public Material Dark => Lit("dark", new Color(0.06f, 0.06f, 0.07f), null, 1f, 0.3f);
+        public Material Rubber => Lit("rubber", new Color(0.04f, 0.04f, 0.04f), null, 1f, 0.35f);
+        public Material TrimWhite => Lit("trim_white", new Color(0.93f, 0.93f, 0.91f), null, 1f, 0.35f);
+        public Material StoreGlass => Glass("store_glass", new Color(0.65f, 0.78f, 0.82f, 0.16f));
+        public Material RailGlass => Glass("rail_glass", new Color(0.6f, 0.8f, 0.8f, 0.22f));
+        public Material SkyGlass => Glass("sky_glass", new Color(0.75f, 0.85f, 0.9f, 0.12f), 0.98f);
+        public Material CeilingLight => Emissive("ceiling_light", new Color(1f, 0.98f, 0.94f), new Color(2.4f, 2.3f, 2.1f));
+        public Material Water => Lit("water", new Color(0.25f, 0.5f, 0.6f), null, 1f, 0.97f, 0.1f);
+        public Material Paper => Lit("paper", new Color(0.97f, 0.97f, 0.95f), null, 1f, 0.1f);
 
-        public Material Paint(string family, Color c, string texture = null, float tile = 2f, float smoothness = 0.15f) =>
-            Lit(family + "_" + Hex(c), c, texture, tile, smoothness);
+        public Material Paint(string family, Color c, float smoothness = 0.25f) =>
+            Lit(family + "_" + Hex(c), c, null, 1f, smoothness);
 
         public Material Emission(string key, Color c, float intensity) => Emissive(key, c, c * intensity);
     }

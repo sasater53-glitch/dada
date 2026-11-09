@@ -19,15 +19,18 @@ namespace CityBiz.Game
         public static void Register(IInteractable i) { if (!All.Contains(i)) All.Add(i); }
         public static void Unregister(IInteractable i) => All.Remove(i);
 
-        /// <summary>Ближайший доступный объект в радиусе, предпочтительно перед игроком.</summary>
-        public static IInteractable FindBest(Vector3 position, Vector3 forward, float radius)
+        /// <summary>Ближайший доступный объект в радиусе, предпочтительно перед игроком (только на своём этаже).</summary>
+        public static IInteractable FindBest(Vector3 position, Vector3 forward, float radius, float maxHeightDelta = 2.2f)
         {
+            forward.y = 0f;
+            forward = forward.sqrMagnitude > 0.0001f ? forward.normalized : Vector3.forward;
             IInteractable best = null;
             float bestScore = float.MaxValue;
             foreach (var i in All)
             {
                 if (!i.CanInteract) continue;
                 var delta = i.InteractPosition - position;
+                if (Mathf.Abs(delta.y) > maxHeightDelta) continue;
                 delta.y = 0f;
                 float d = delta.magnitude;
                 if (d > radius) continue;
@@ -39,7 +42,7 @@ namespace CityBiz.Game
         }
     }
 
-    /// <summary>Реестр «агентов» (игрок, NPC, машины не входят) — для автоматических дверей.</summary>
+    /// <summary>Реестр «агентов» (игрок и покупатели) — для автоматических дверей.</summary>
     public static class Agents
     {
         public static readonly List<Transform> All = new List<Transform>(128);

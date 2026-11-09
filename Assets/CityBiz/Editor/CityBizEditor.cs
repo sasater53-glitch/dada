@@ -12,13 +12,13 @@ using UnityEngine.SceneManagement;
 namespace CityBiz.EditorTools
 {
     /// <summary>
-    /// Настройка проекта в один клик: URP, сцена стартового района, запекание статики и Occlusion Culling.
+    /// Настройка проекта в один клик: URP, сцена ТРЦ «Галерея», запекание статики и Occlusion Culling.
     /// При первом открытии проекта сцена создаётся автоматически.
     /// </summary>
     [InitializeOnLoad]
     public static class CityBizEditor
     {
-        public const string ScenePath = "Assets/CityBiz/Scenes/StarterDistrict.unity";
+        public const string ScenePath = "Assets/CityBiz/Scenes/Galleria.unity";
         const string BakeFolder = "Assets/CityBiz/Generated";
         const string SessionKey = "CityBiz.FirstRunChecked";
 
@@ -35,7 +35,7 @@ namespace CityBiz.EditorTools
             if (EditorApplication.isPlayingOrWillChangePlaymode) return;
             if (GraphicsSettings.defaultRenderPipeline == null) EnsureUrp(false);
             if (!File.Exists(ScenePath)) CreateScene();
-            // Если открыта пустая безымянная сцена — сразу открываем район
+            // Если открыта пустая безымянная сцена — сразу открываем ТЦ
             var active = SceneManager.GetActiveScene();
             if (string.IsNullOrEmpty(active.path) && !active.isDirty) EditorSceneManager.OpenScene(ScenePath);
         }
@@ -71,9 +71,11 @@ namespace CityBiz.EditorTools
                     var rendererType = load.GetParameters()[0].ParameterType;
                     load.Invoke(asset, new[] { Enum.Parse(rendererType, "UniversalRenderer") });
                 }
-                SetProp(asset, "shadowDistance", 110f);
+                // Внутри ТЦ тени нужны вблизи; точечных источников на объект — до 8 (бюджет света держит их число низким)
+                SetProp(asset, "shadowDistance", 70f);
                 SetProp(asset, "supportsHDR", true);
                 SetProp(asset, "msaaSampleCount", 4);
+                SetProp(asset, "maxAdditionalLightsCount", 8);
                 EditorUtility.SetDirty(asset);
                 AssetDatabase.SaveAssets();
                 GraphicsSettings.defaultRenderPipeline = asset;
@@ -95,7 +97,7 @@ namespace CityBiz.EditorTools
 
         // ---------------- Сцена ----------------
 
-        [MenuItem("CityBiz/Открыть стартовый район", priority = 0)]
+        [MenuItem("CityBiz/Открыть ТРЦ «Галерея»", priority = 0)]
         static void OpenScene()
         {
             if (!File.Exists(ScenePath)) CreateScene();
@@ -118,39 +120,51 @@ namespace CityBiz.EditorTools
 
         // ---------------- Запекание ----------------
 
-        [MenuItem("CityBiz/Запечь район (статика + Occlusion Culling)", priority = 40)]
+        [MenuItem("CityBiz/Запечь ТЦ (статика + Occlusion Culling)", priority = 40)]
         static void Bake()
         {
             if (!File.Exists(ScenePath)) CreateScene();
+            if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
             var scene = EditorSceneManager.OpenScene(ScenePath);
             RemoveBaked();
 
             MaterialLibrary.Reset();
-            var world = DistrictRegistry.CreateWorld();
-            var builder = new DistrictBuilder(MaterialLibrary.Instance, world);
-            var root = new GameObject("City").transform;
-            var districts = new List<DistrictInstance>();
-            foreach (var bp in DistrictRegistry.All)
+            AssetCatalog.Reset();
+            var world = MallRegistry.CreateWorld();
+            var builder = new MallBuilder(MaterialLibrary.Instance, world);
+            var root = new GameObject("Malls").transform;
+            var malls = new List<MallInstance>();
+            try
             {
-                var inst = builder.Build(bp, root);
-                inst.Baked = true;
-                districts.Add(inst);
+                foreach (var bp in MallRegistry.All)
+                {
+                    var inst = builder.Build(bp, root);
+                    inst.Baked = true;
+                    malls.Add(inst);
+                }
+
+                SaveGeneratedAssets(root.gameObject, malls);
+                // Меши теперь ассеты — компоненты-владельцы больше не нужны
+                foreach (var owner in root.GetComponentsInChildren<GeneratedMesh>(true)) UnityEngine.Object.DestroyImmediate(owner);
+                foreach (var m in malls) MarkStatic(m.transform.Find("Static"));
+            }
+            finally
+            {
+                // Скрытые шаблоны моделей не должны остаться в сцене
+                AssetCatalog.DestroyTemplates();
             }
 
-            SaveGeneratedAssets(root.gameObject, districts);
-            foreach (var d in districts) MarkStatic(d.transform.Find("Static"));
-
-            StaticOcclusionCulling.smallestOccluder = 4f;
-            StaticOcclusionCulling.smallestHole = 0.3f;
+            StaticOcclusionCulling.smallestOccluder = 3f;
+            StaticOcclusionCulling.smallestHole = 0.25f;
             StaticOcclusionCulling.backfaceThreshold = 100f;
             bool ok = StaticOcclusionCulling.Compute();
             EditorSceneManager.MarkSceneDirty(scene);
             EditorSceneManager.SaveScene(scene);
             MaterialLibrary.Reset();
-            Debug.Log(ok ? "[CityBiz] Район запечён: статика помечена, Occlusion Culling рассчитан." : "[CityBiz] Район сохранён, но расчёт Occlusion Culling не удался.");
+            Debug.Log(ok ? "[CityBiz] ТЦ запечён: статика помечена, Occlusion Culling рассчитан." : "[CityBiz] ТЦ сохранён, но расчёт Occlusion Culling не удался.");
         }
 
-        [MenuItem("CityBiz/Удалить запечённый район", priority = 41)]
+        [MenuItem("CityBiz/Удалить запечённый ТЦ", priority = 41)]
         static void RemoveBakedMenu()
         {
             RemoveBaked();
@@ -160,13 +174,14 @@ namespace CityBiz.EditorTools
         static void RemoveBaked()
         {
 #if UNITY_6000_6_OR_NEWER
-            var existing = UnityEngine.Object.FindObjectsByType<DistrictInstance>();
+            var existing = UnityEngine.Object.FindObjectsByType<MallInstance>();
 #else
-            var existing = UnityEngine.Object.FindObjectsByType<DistrictInstance>(FindObjectsSortMode.None);
+            var existing = UnityEngine.Object.FindObjectsByType<MallInstance>(FindObjectsSortMode.None);
 #endif
-            foreach (var d in existing)
+            foreach (var m in existing)
             {
-                var top = d.transform.parent != null ? d.transform.parent.gameObject : d.gameObject;
+                if (m == null) continue;
+                var top = m.transform.parent != null ? m.transform.parent.gameObject : m.gameObject;
                 UnityEngine.Object.DestroyImmediate(top);
             }
             StaticOcclusionCulling.Clear();
@@ -174,11 +189,11 @@ namespace CityBiz.EditorTools
         }
 
         /// <summary>Процедурные меши, материалы и текстуры сохраняются как под-ассеты одного файла.</summary>
-        static void SaveGeneratedAssets(GameObject root, List<DistrictInstance> districts)
+        static void SaveGeneratedAssets(GameObject root, List<MallInstance> malls)
         {
             Directory.CreateDirectory(BakeFolder);
-            var container = ScriptableObject.CreateInstance<GeneratedDistrictAssets>();
-            string path = BakeFolder + "/DistrictAssets.asset";
+            var container = ScriptableObject.CreateInstance<GeneratedMallAssets>();
+            string path = BakeFolder + "/MallAssets.asset";
             AssetDatabase.CreateAsset(container, path);
             var added = new HashSet<UnityEngine.Object>();
 
@@ -194,25 +209,31 @@ namespace CityBiz.EditorTools
             foreach (var mf in root.GetComponentsInChildren<MeshFilter>(true)) Add(mf.sharedMesh);
             foreach (var r in root.GetComponentsInChildren<Renderer>(true))
                 foreach (var m in r.sharedMaterials) Add(m);
-            foreach (var d in districts)
+            foreach (var ps in root.GetComponentsInChildren<ParticleSystemRenderer>(true)) Add(ps.sharedMaterial);
+            foreach (var mall in malls)
             {
-                var inst = d.GetComponent<InstancedRenderer>();
+                var inst = mall.GetComponent<InstancedRenderer>();
                 if (inst != null)
                     foreach (var b in inst.Batches) { Add(b.Mesh); Add(b.Material); }
-                foreach (var e in d.Materials) Add(e.Material);
+                foreach (var e in mall.Materials) Add(e.Material);
             }
             AssetDatabase.SaveAssets();
         }
 
+        /// <summary>Двери, вывески, эскалаторы, стенды, лифт и частицы меняются во время игры — их не помечаем статикой.</summary>
+        static bool IsDynamic(Transform t) =>
+            t.GetComponent<StorefrontView>() != null || t.GetComponent<AutoDoor>() != null || t.GetComponent<Escalator>() != null ||
+            t.GetComponent<TextMesh>() != null || t.GetComponent<MallDirectoryPoint>() != null || t.GetComponent<ElevatorPanel>() != null ||
+            t.GetComponent<ParticleSystem>() != null || t.GetComponent<SignMirror>() != null;
+
         static void MarkStatic(Transform t)
         {
-            if (t == null) return;
-            // Двери, вывески, интерьеры и веранды меняются во время игры — их не помечаем
-            if (t.GetComponent<PropertyView>() != null || t.GetComponent<AutoDoor>() != null || t.GetComponent<TextMesh>() != null ||
-                t.GetComponent<DirectoryPoint>() != null || t.GetComponent<ParticleSystem>() != null || t.GetComponent<TrafficLightView>() != null) return;
-            var flags = StaticEditorFlags.OccluderStatic | StaticEditorFlags.OccludeeStatic;
-            // Здания меняют материалы окон ночью — без статического батчинга, остальное можно батчить
-            if (t.GetComponentInParent<BuildingLights>() == null) flags |= StaticEditorFlags.BatchingStatic;
+            if (t == null || IsDynamic(t)) return;
+            var flags = StaticEditorFlags.OccluderStatic | StaticEditorFlags.OccludeeStatic | StaticEditorFlags.BatchingStatic;
+            // Стекло не должно перекрывать видимость при расчёте Occlusion Culling
+            var mr = t.GetComponent<MeshRenderer>();
+            if (mr != null && mr.sharedMaterial != null && mr.sharedMaterial.renderQueue >= (int)RenderQueue.Transparent)
+                flags &= ~StaticEditorFlags.OccluderStatic;
             GameObjectUtility.SetStaticEditorFlags(t.gameObject, flags);
             foreach (Transform child in t) MarkStatic(child);
         }

@@ -22,6 +22,22 @@ namespace CityBiz.Core
 
         public bool IsWet => Kind == WeatherKind.Rain || Kind == WeatherKind.Storm;
 
+        /// <summary>Посещаемость ТЦ: в непогоду люди идут под крышу, в ясный день — гуляют на улице.</summary>
+        public float MallVisitMultiplier
+        {
+            get
+            {
+                switch (Kind)
+                {
+                    case WeatherKind.Rain: return 1.2f;
+                    case WeatherKind.Storm: return 1.1f;
+                    case WeatherKind.Fog: return 1.05f;
+                    case WeatherKind.Cloudy: return 1.0f;
+                    default: return 0.92f;
+                }
+            }
+        }
+
         /// <summary>Множитель уличного трафика: в дождь людей на улице меньше.</summary>
         public float FootTrafficMultiplier
         {

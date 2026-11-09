@@ -34,6 +34,8 @@ namespace CityBiz.Game
 
         public IReadOnlyList<Batch> Batches => _batches;
 
+        public void Clear() => _batches.Clear();
+
         public void Add(Mesh mesh, Material[] materials, Matrix4x4 matrix, bool shadows = true, float maxDistance = 260f)
         {
             var pos = matrix.GetColumn(3);

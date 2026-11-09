@@ -50,8 +50,8 @@ namespace CityBiz.Core
 
         public long PropertyValue(PropertyState p)
         {
-            var district = World.GetDistrict(p.Def.DistrictId);
-            float mult = district != null ? district.RentMultiplier : 1f;
+            var mall = World.GetMall(p.Def.MallId);
+            float mult = mall != null ? mall.RentMultiplier : 1f;
             return (long)(p.Def.BasePrice * mult * (0.75f + 0.25f * p.Condition));
         }
 

@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace CityBiz.Core
 {
     public static class NameGenerator
@@ -6,6 +8,22 @@ namespace CityBiz.Core
         static readonly string[] FemaleFirst = { "Анна", "Мария", "Екатерина", "Ольга", "Дарья", "Алина", "Полина", "Виктория", "Софья", "Ксения", "Юлия", "Ирина", "Вера", "Лилия" };
         static readonly string[] Surnames = { "Смирнов", "Кузнецов", "Попов", "Соколов", "Лебедев", "Козлов", "Новиков", "Морозов", "Волков", "Зайцев", "Павлов", "Семенов", "Голубев", "Орлов", "Белов", "Комаров" };
 
+        static readonly Dictionary<BusinessType, string[]> Brands = new Dictionary<BusinessType, string[]>
+        {
+            { BusinessType.Cafe, new[] { "Кофейня «Зерно»", "Café Bloom", "Кофе и Точка", "Brew Lab", "Шоколадница-Лайт", "Coffee Mood" } },
+            { BusinessType.Restaurant, new[] { "Trattoria Verde", "Гриль-бар «Уголь»", "Ресторан «Терраса»", "Asia House", "Бистро «Платан»" } },
+            { BusinessType.FastFood, new[] { "Burger Point", "Пицца Мания", "Суши Wok", "Шаурма №1", "Taco Loco", "Блинная «Тесто»" } },
+            { BusinessType.IceCream, new[] { "Gelato", "Пломбир+", "Frozen Joy", "Сладкий остров" } },
+            { BusinessType.ClothingStore, new[] { "Urban Wear", "Mode&Co", "Линия", "Basic Lab", "Denim Story", "Nord Style", "Sport Zone", "Kids Fashion" } },
+            { BusinessType.Electronics, new[] { "Техно Мир", "Gadget Store", "Pixel", "Мобильный центр", "Smart Home" } },
+            { BusinessType.Toys, new[] { "Детский мир игрушек", "Toy Planet", "Кубик", "Hobby Games" } },
+            { BusinessType.Cosmetics, new[] { "Beauty Box", "Аромат", "Парфюм Лайн", "Natura" } },
+            { BusinessType.Bookstore, new[] { "Читай-ка", "Книжный квартал", "Page Turner" } },
+            { BusinessType.Jewelry, new[] { "Золотая линия", "Diamond Hall", "Ювелирный дом «Аметист»" } },
+            { BusinessType.Supermarket, new[] { "Гипермаркет «Корзина»", "Fresh Market", "Продукты 24" } },
+            { BusinessType.Warehouse, new[] { "Склад-Про", "Логистика ТЦ", "Кладовая" } },
+        };
+
         public static string Person(DeterministicRandom rng, bool female)
         {
             string first = female ? rng.Pick(FemaleFirst) : rng.Pick(MaleFirst);
@@ -13,22 +31,9 @@ namespace CityBiz.Core
             return first + " " + last;
         }
 
-        public static string Surname(DeterministicRandom rng) => rng.Pick(Surnames);
+        public static string Brand(BusinessType type, DeterministicRandom rng) =>
+            Brands.TryGetValue(type, out var list) ? rng.Pick(list) : "Магазин";
 
-        public static string DefaultBusinessName(BusinessType type, DeterministicRandom rng)
-        {
-            string[] options;
-            switch (type)
-            {
-                case BusinessType.Cafe: options = new[] { "Кофейня «Зерно»", "Кафе «Утро»", "Кофе и Точка", "Café Bloom" }; break;
-                case BusinessType.Restaurant: options = new[] { "Ресторан «Терраса»", "Бистро «Платан»", "Trattoria Verde", "Гриль-бар «Уголь»" }; break;
-                case BusinessType.ClothingStore: options = new[] { "Бутик «Линия»", "Urban Wear", "Магазин «Стиль»", "Mode&Co" }; break;
-                case BusinessType.Supermarket: options = new[] { "Маркет «Соседи»", "Супермаркет «Корзина»", "Fresh Market", "Продукты 24" }; break;
-                case BusinessType.Office: options = new[] { "Консалтинг «Вектор»", "Studio Grid", "Агентство «Пиксель»", "Альфа Аналитика" }; break;
-                case BusinessType.Warehouse: options = new[] { "Логистика «Склад-Про»", "Терминал «Восток»", "Склад №7" }; break;
-                default: options = new[] { "Бизнес" }; break;
-            }
-            return rng.Pick(options);
-        }
+        public static string DefaultBusinessName(BusinessType type, DeterministicRandom rng) => Brand(type, rng);
     }
 }

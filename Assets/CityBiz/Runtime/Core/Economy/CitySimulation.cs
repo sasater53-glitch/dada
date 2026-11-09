@@ -4,15 +4,18 @@ using System.Collections.Generic;
 namespace CityBiz.Core
 {
     /// <summary>
-    /// Авторитетная симуляция экономики города. Живёт только на сервере (или у хоста).
+    /// Авторитетная симуляция экономики торгового центра. Живёт только на сервере (или у хоста).
     /// Время продвигается вызовом Advance, вся логика выполняется на границах игровых часов,
     /// поэтому результат не зависит от FPS и частоты тиков.
     /// </summary>
     public sealed partial class CitySimulation
     {
-        public const int MaxCandidates = 10;
+        public const int MaxCandidates = 12;
         public const int FirstHumanPlayerId = 1;
-        public const float OutsideOption = 0.4f; // доля спроса, уходящая в другие районы
+        public const float OutsideOption = 0.45f; // доля спроса, уходящая в другие ТЦ и интернет
+
+        // Посещаемость ТЦ по часам (доля от пиковой)
+        static readonly float[] MallCurve = { 0.02f,0,0,0,0,0,0,0.05f,0.25f,0.45f,0.7f,0.8f,0.95f,1f,0.95f,0.9f,0.95f,1.05f,1.15f,1.1f,0.9f,0.6f,0.3f,0.05f };
 
         public readonly CityState State;
         readonly DeterministicRandom _rng;
@@ -24,12 +27,15 @@ namespace CityBiz.Core
         /// <summary>Id хоста: только он может менять скорость времени.</summary>
         public int HostPlayerId = FirstHumanPlayerId;
 
+        /// <summary>Посетителей в ТЦ за последний час (для UI и визуализации толпы).</summary>
+        public float LastHourVisitors { get; private set; }
+
         public CitySimulation(WorldDefinition world, ulong seed, double startMinutes = -1)
         {
             State = new CityState(world);
             _rng = new DeterministicRandom(seed);
-            State.TimeMinutes = startMinutes >= 0 ? startMinutes : GameTime.FromDayHour(1, 8, 30).TotalMinutes;
-            State.Weather = new WeatherState { Kind = WeatherKind.Clear, HoursLeft = 5 };
+            State.TimeMinutes = startMinutes >= 0 ? startMinutes : GameTime.FromDayHour(1, 11, 0).TotalMinutes;
+            State.Weather = new WeatherState { Kind = WeatherKind.Cloudy, HoursLeft = 4 };
 
             foreach (var rival in world.Rivals)
             {
@@ -40,8 +46,8 @@ namespace CityBiz.Core
                 _rivals.Add(new RivalAI(rival, DeterministicRandom.Hash(seed, (ulong)rival.PlayerId)));
             }
 
-            foreach (var district in world.Districts)
-                foreach (var init in district.Initial)
+            foreach (var mall in world.Malls)
+                foreach (var init in mall.Initial)
                     ApplyInitial(init);
 
             while (State.Candidates.Count < MaxCandidates) State.Candidates.Add(CreateCandidate(null));
@@ -58,17 +64,18 @@ namespace CityBiz.Core
             prop.ForSale = init.ForSale;
             prop.SalePrice = init.ForSale ? (long)(State.PropertyValue(prop) * 1.1f) : 0;
             prop.ForRent = prop.TenantId == 0 && init.Business == BusinessType.None;
-            prop.ResidentOccupied = init.ApartmentOccupied;
             if (init.Business == BusinessType.None) return;
 
             int operatorId = prop.OperatorId;
             if (operatorId == 0) throw new ArgumentException("Initial business needs an owner or tenant player: " + init.PropertyId);
             var def = EconomyCatalog.Get(init.Business);
+            if (!def.Allows(prop.Def.Kind)) throw new ArgumentException($"{init.Business} is not allowed in {prop.Def.Kind}");
             var b = new BusinessState
             {
                 Id = State.NextBusinessId++, OwnerId = operatorId, PropertyId = prop.Id, Type = init.Business,
-                Name = init.BusinessName ?? NameGenerator.DefaultBusinessName(init.Business, _rng),
-                PriceLevel = init.PriceLevel, Reputation = 0.55f + _rng.Range(-0.05f, 0.1f), Level = 1, Security = 0,
+                Name = init.BusinessName ?? NameGenerator.Brand(init.Business, _rng),
+                PriceLevel = init.PriceLevel, Reputation = 0.5f + _rng.Range(0f, 0.15f),
+                Interior = init.Interior, Marketing = init.Marketing, EquipmentLevel = init.EquipmentLevel, Assortment = init.Assortment, Security = init.Security,
             };
             for (int i = 0; i < Math.Max(def.MinStaff, init.Staff); i++)
             {
@@ -90,7 +97,7 @@ namespace CityBiz.Core
             if (name.Length > 24) name = name.Substring(0, 24);
             State.Players[id] = new PlayerState { Id = id, Name = name, Cash = EconomyCatalog.StartingCash, Online = true, Color = color };
             RecomputeNetWorth();
-            Publish(NewsCategory.Info, $"{name} начинает свой путь в бизнесе.");
+            Publish(NewsCategory.Info, $"{name} открывает своё дело в ТЦ.");
             return id;
         }
 
@@ -124,14 +131,13 @@ namespace CityBiz.Core
             {
                 var prev = State.Weather.Kind;
                 State.Weather = WeatherModel.Next(State.Weather, _rng);
-                if (State.Weather.Kind != prev && (State.Weather.Kind == WeatherKind.Storm || State.Weather.Kind == WeatherKind.Rain || prev == WeatherKind.Storm))
-                    Publish(NewsCategory.Weather, "Погода: " + WeatherState.DisplayName(State.Weather.Kind));
+                if (State.Weather.Kind != prev && (State.Weather.IsWet || prev == WeatherKind.Storm))
+                    Publish(NewsCategory.Weather, "Погода: " + WeatherState.DisplayName(State.Weather.Kind) + (State.Weather.IsWet ? " — в ТЦ больше посетителей" : ""));
             }
 
-            if (time.Hour == 6 || time.Hour == 14) AutoRestockAll();
+            if (time.Hour == 7 || time.Hour == 15) AutoRestockAll();
             UpdateOpenStates();
-            ProcessFootTraffic(time);
-            ProcessServiceBusinesses(time);
+            ProcessVisitors(time);
             ExpireOffers();
             foreach (var p in State.Players.Values) p.Heat = Math.Max(0f, p.Heat - 0.01f);
             foreach (var ai in _rivals) ai.OnHour(this, time.Hour);
@@ -142,7 +148,6 @@ namespace CityBiz.Core
             var def = b.Def;
             if (def == null) return false;
             if (!def.IsOpenAt(time.Hour)) return false;
-            if (def.WeekendMultiplier <= 0f && time.IsWeekend) return false;
             if (b.Employees.Count < def.MinStaff) return false;
             if (time.WholeMinutes < b.ClosedUntilMinute) return false;
             return true;
@@ -160,25 +165,55 @@ namespace CityBiz.Core
         public static float QualityOf(BusinessState b, PropertyState prop)
         {
             float condition = prop != null ? prop.Condition : 1f;
-            float q = 0.12f + 0.33f * b.AverageSkill + 0.2f * b.Equipment + 0.12f * condition
-                      + 0.13f * (b.Level - 1) / 2f + 0.1f * b.AverageMorale;
+            float q = 0.1f + 0.28f * b.AverageSkill + 0.14f * b.EquipmentCondition + 0.08f * condition + 0.08f * b.AverageMorale
+                      + 0.06f * (b.Interior - 1) + 0.03f * (b.EquipmentLevel - 1);
             return Clamp01(q);
         }
 
-        float ServiceCapacity(BusinessState b)
+        /// <summary>Привлекательность точки для проходящих мимо: проходимость места, реклама и витрина.</summary>
+        public static float Attraction(BusinessState b, PropertyState prop) =>
+            prop.Def.FootTraffic * (1f + 0.18f * b.Marketing) * (1f + 0.04f * (b.Interior - 1));
+
+        public static float ServiceCapacity(BusinessState b)
         {
             var def = b.Def;
             float cap = 0f;
             foreach (var e in b.Employees) cap += def.CustomersPerStaffHour * (0.6f + 0.6f * e.Skill);
-            return cap * (0.5f + 0.5f * b.Equipment);
+            return cap * (0.5f + 0.5f * b.EquipmentCondition) * (1f + 0.2f * (b.EquipmentLevel - 1));
         }
 
-        void ProcessFootTraffic(GameTime time)
+        public static float TicketMultiplier(BusinessState b) => 1f + 0.1f * (b.Assortment - 1);
+
+        /// <summary>Привлекательность ТЦ целиком: чем больше работающих магазинов, тем больше людей приходит.</summary>
+        float MallAttractiveness(MallDef mall)
+        {
+            int shops = 0, open = 0;
+            float marketing = 0f;
+            foreach (var p in mall.Properties)
+            {
+                if (p.Kind == PropertyKind.Storage) continue;
+                shops++;
+                var b = State.BusinessAt(p.Id);
+                if (b == null || !b.IsOpenNow) continue;
+                open++;
+                marketing += b.Marketing;
+            }
+            if (shops == 0) return 0f;
+            return 0.55f + 0.45f * open / shops + Math.Min(0.15f, marketing * 0.004f);
+        }
+
+        void ProcessVisitors(GameTime time)
         {
             foreach (var b in State.Businesses.Values) b.LastHourCustomers = 0;
+            float totalVisitors = 0f;
 
-            foreach (var district in State.World.Districts)
+            foreach (var mall in State.World.Malls)
             {
+                float visitors = mall.BaseVisitorsPerHour * MallCurve[time.Hour] * State.Weather.MallVisitMultiplier
+                                 * (time.IsWeekend ? 1.35f : 1f) * MallAttractiveness(mall);
+                totalVisitors += visitors;
+                if (visitors <= 0f) continue;
+
                 foreach (var def in EconomyCatalog.All)
                 {
                     if (!def.FootTraffic) continue;
@@ -186,36 +221,35 @@ namespace CityBiz.Core
                     foreach (var b in State.Businesses.Values)
                     {
                         if (b.Type != def.Type || !b.IsOpenNow) continue;
-                        var prop = State.GetProperty(b.PropertyId);
-                        if (prop.Def.DistrictId == district.Id) _scratch.Add(b);
+                        if (State.GetProperty(b.PropertyId).Def.MallId == mall.Id) _scratch.Add(b);
                     }
                     if (_scratch.Count == 0) continue;
 
-                    float demand = def.BaseHourlyDemand * def.HourCurve[time.Hour] * district.TrafficMultiplier
-                                   * State.Weather.FootTrafficMultiplier * (time.IsWeekend ? def.WeekendMultiplier : 1f);
+                    float demand = visitors * def.VisitShare * def.HourCurve[time.Hour] * (time.IsWeekend ? def.WeekendMultiplier : 1f);
                     if (State.Weather.IsWet) demand *= def.RainMultiplier;
                     if (demand <= 0f) continue;
 
-                    float elasticity = def.PriceElasticity / Math.Max(0.5f, district.Wealth);
+                    float elasticity = def.PriceElasticity / Math.Max(0.5f, mall.Wealth);
                     float total = 0f;
                     var weights = new float[_scratch.Count];
                     for (int i = 0; i < _scratch.Count; i++)
                     {
                         var b = _scratch[i];
                         var prop = State.GetProperty(b.PropertyId);
-                        float quality = Quality(b);
-                        weights[i] = prop.Def.FootTraffic * (float)Math.Pow(Math.Max(0.05f, quality), 1.2)
-                                     * (0.35f + b.Reputation) * (float)Math.Pow(b.PriceLevel, -elasticity);
+                        float quality = QualityOf(b, prop);
+                        weights[i] = Attraction(b, prop) * (float)Math.Pow(Math.Max(0.05f, quality), 1.2)
+                                     * (0.35f + b.Reputation) * (1f + 0.05f * (b.Assortment - 1)) * (float)Math.Pow(b.PriceLevel, -elasticity);
                         total += weights[i];
                     }
 
                     for (int i = 0; i < _scratch.Count; i++)
-                        ServeCustomers(_scratch[i], def, district, demand * weights[i] / (total + OutsideOption));
+                        ServeCustomers(_scratch[i], def, mall, demand * weights[i] / (total + OutsideOption));
                 }
             }
+            LastHourVisitors = totalVisitors;
         }
 
-        void ServeCustomers(BusinessState b, BusinessTypeDef def, DistrictDef district, float expected)
+        void ServeCustomers(BusinessState b, BusinessTypeDef def, MallDef mall, float expected)
         {
             float raw = expected + b.CustomerCarry;
             int wanted = (int)Math.Floor(raw);
@@ -227,7 +261,7 @@ namespace CityBiz.Core
             int lost = wanted - served;
             if (def.UsesStock) b.Stock -= served;
 
-            float baseRevenue = served * def.AvgTicket * district.Wealth;
+            float baseRevenue = served * def.AvgTicket * mall.Wealth * TicketMultiplier(b);
             long revenue = (long)Math.Round(baseRevenue * b.PriceLevel);
             long cogs = (long)Math.Round(baseRevenue * def.CogsRatio);
             var owner = State.GetPlayer(b.OwnerId);
@@ -241,32 +275,10 @@ namespace CityBiz.Core
             float quality = Quality(b);
             float priceScore = 1f - Clamp01((b.PriceLevel - 0.8f) / 1.0f);
             float overflow = (float)lost / wanted;
-            float s = Clamp01(0.2f + 0.5f * quality + 0.3f * priceScore - 0.35f * overflow);
+            float s = Clamp01(0.15f + 0.55f * quality + 0.3f * priceScore - 0.35f * overflow);
             b.Satisfaction += (s - b.Satisfaction) * 0.2f;
             float weight = Math.Min(1f, wanted / 12f) * 0.035f;
             b.Reputation = Clamp01(b.Reputation + (s - b.Reputation) * weight);
-        }
-
-        void ProcessServiceBusinesses(GameTime time)
-        {
-            foreach (var b in State.Businesses.Values)
-            {
-                if (b.Type != BusinessType.Office || !b.IsOpenNow) continue;
-                var def = b.Def;
-                float utilisation = Clamp01(1.25f - 0.5f * b.PriceLevel * (1.3f - b.Reputation));
-                float income = 0f;
-                foreach (var e in b.Employees) income += def.ContractIncomePerStaffHour * (0.5f + e.Skill);
-                income *= b.PriceLevel * utilisation * (0.6f + 0.4f * b.Equipment);
-                long revenue = (long)Math.Round(income);
-                var owner = State.GetPlayer(b.OwnerId);
-                if (owner != null) owner.Cash += revenue;
-                b.TodayRevenue += revenue;
-                b.LastHourCustomers = (int)Math.Round(b.Employees.Count * utilisation);
-                b.TodayCustomers += b.LastHourCustomers;
-                float s = Clamp01(0.3f + 0.6f * Quality(b) - 0.2f * Math.Max(0f, b.PriceLevel - 1f));
-                b.Satisfaction += (s - b.Satisfaction) * 0.2f;
-                b.Reputation = Clamp01(b.Reputation + (s - b.Reputation) * 0.02f);
-            }
         }
 
         // ---------------- Сутки ----------------
@@ -288,13 +300,10 @@ namespace CityBiz.Core
                 AddIncome(playerId, delta);
             }
 
-            // Аренда помещений, жильцы квартир, парковки, налог на имущество.
-            int districtCustomers = 0;
-            foreach (var b in State.Businesses.Values) districtCustomers += b.TodayCustomers;
-
+            // Аренда и налог на имущество
             foreach (var prop in State.Properties.Values)
             {
-                prop.Condition = Math.Max(0.2f, prop.Condition - 0.004f);
+                prop.Condition = Math.Max(0.2f, prop.Condition - 0.003f);
                 prop.LastIncome = 0;
 
                 if (prop.TenantId != 0)
@@ -304,6 +313,7 @@ namespace CityBiz.Core
                     {
                         Book(prop.TenantId, -prop.RentPrice);
                         Book(prop.OwnerId, prop.RentPrice);
+                        if (prop.OwnerId != 0) prop.LastIncome = prop.RentPrice;
                         prop.DebtDays = 0;
                     }
                     else if (++prop.DebtDays >= EconomyCatalog.EvictionDebtDays)
@@ -313,53 +323,28 @@ namespace CityBiz.Core
                     }
                 }
 
-                if (prop.Def.Kind == PropertyKind.Apartment && prop.OwnerId != 0)
-                {
-                    float marketRent = prop.Def.BaseRent;
-                    float ratio = prop.RentPrice / Math.Max(1f, marketRent);
-                    if (prop.ResidentOccupied)
-                    {
-                        long net = (long)(prop.RentPrice * 0.92f); // 8% — коммунальные расходы
-                        Book(prop.OwnerId, net);
-                        prop.LastIncome = net;
-                        if (_rng.Chance(0.02 + Math.Max(0f, ratio - 1.1f) * 0.25f)) prop.ResidentOccupied = false;
-                    }
-                    else if (prop.ForRent && _rng.Chance(Clamp(1.15f - 0.85f * ratio, 0.03f, 0.85f)))
-                    {
-                        prop.ResidentOccupied = true;
-                        Publish(NewsCategory.Property, $"В «{prop.Def.Name}» заселились новые жильцы.", prop.Id);
-                    }
-                }
-
-                if (prop.Def.Kind == PropertyKind.Parking && prop.OperatorId != 0)
-                {
-                    float occupancy = Clamp(0.3f + districtCustomers / 3000f, 0.2f, 0.95f);
-                    long income = (long)(prop.Def.ParkingSpots * 14f * occupancy);
-                    Book(prop.OperatorId, income);
-                    prop.LastIncome = income;
-                }
-
                 if (prop.OwnerId != 0)
                     Book(prop.OwnerId, -(long)(State.PropertyValue(prop) * EconomyCatalog.PropertyTaxPerDay));
             }
 
-            // Бизнесы: зарплаты, охрана, налоги, мораль, износ.
+            // Бизнесы: зарплаты, реклама, охрана, налоги, мораль, износ
             var quitters = new List<EmployeeState>();
             foreach (var b in State.Businesses.Values)
             {
                 var def = b.Def;
                 long wages = b.DailyWages;
-                long security = b.Security * EconomyCatalog.SecurityDailyCostPerLevel;
+                long upkeep = 0;
+                foreach (var u in EconomyCatalog.AllUpgrades) upkeep += u.DailyCostPerLevel * b.GetLevel(u.Kind);
                 long storage = 0;
                 if (b.Type == BusinessType.Warehouse && b.Employees.Count >= def.MinStaff)
-                    storage = (long)(def.StorageIncomePerDay * (0.6f + 0.6f * b.AverageSkill) * Math.Min(1.5f, b.PriceLevel));
+                    storage = (long)(def.StorageIncomePerDay * (0.6f + 0.6f * b.AverageSkill) * Math.Min(1.5f, b.PriceLevel) * (1f + 0.15f * (b.EquipmentLevel - 1)));
                 b.TodayRevenue += storage;
-                long profit = b.TodayRevenue - b.TodayCosts - wages - security;
+                long profit = b.TodayRevenue - b.TodayCosts - wages - upkeep;
                 long tax = profit > 0 ? (long)(profit * EconomyCatalog.TaxRate) : 0;
                 var owner = State.GetPlayer(b.OwnerId);
                 // Выручка и закупки уже прошли по кассе почасово; здесь — только суточные начисления.
-                if (owner != null) owner.Cash += storage - wages - security - tax;
-                b.TodayCosts += wages + security + tax;
+                if (owner != null) owner.Cash += storage - wages - upkeep - tax;
+                b.TodayCosts += wages + upkeep + tax;
                 AddIncome(b.OwnerId, b.TodayRevenue - b.TodayCosts);
 
                 b.YesterdayCustomers = b.TodayCustomers;
@@ -369,13 +354,14 @@ namespace CityBiz.Core
                 b.TodayCustomers = 0;
                 b.TodayRevenue = 0;
                 b.TodayCosts = 0;
-                b.Equipment = Math.Max(0.3f, b.Equipment - 0.008f);
+                b.EquipmentCondition = Math.Max(0.3f, b.EquipmentCondition - 0.007f);
 
                 quitters.Clear();
                 foreach (var e in b.Employees)
                 {
                     float expected = MarketWage(e.Role, e.Skill);
-                    e.Morale = Clamp01(e.Morale + (e.Wage / expected - 1f) * 0.25f + (b.YesterdayProfit > 0 ? 0.02f : -0.03f) + (0.75f - e.Morale) * 0.05f);
+                    float comfort = 0.01f * (b.Interior - 1); // в красивом зале работать приятнее
+                    e.Morale = Clamp01(e.Morale + (e.Wage / expected - 1f) * 0.25f + (b.YesterdayProfit > 0 ? 0.02f : -0.03f) + comfort + (0.75f - e.Morale) * 0.05f);
                     if (e.Morale < 0.2f && _rng.Chance(0.5)) quitters.Add(e);
                 }
                 foreach (var e in quitters)
@@ -411,6 +397,15 @@ namespace CityBiz.Core
             State.Businesses.Remove(b.Id);
         }
 
+        /// <summary>Сколько было вложено в развитие предприятия (для оценки капитала).</summary>
+        public static long InvestedInUpgrades(BusinessState b, PropertyState prop)
+        {
+            long sum = 0;
+            foreach (var u in EconomyCatalog.AllUpgrades)
+                for (int lvl = u.MinLevel + 1; lvl <= b.GetLevel(u.Kind); lvl++) sum += EconomyRules.UpgradeCost(u, lvl, prop.Def);
+            return sum;
+        }
+
         void RecomputeNetWorth()
         {
             foreach (var p in State.Players.Values) p.NetWorth = p.Cash;
@@ -422,7 +417,9 @@ namespace CityBiz.Core
             foreach (var b in State.Businesses.Values)
             {
                 var owner = State.GetPlayer(b.OwnerId);
-                if (owner != null) owner.NetWorth += (long)(b.Def.SetupCost * (0.3f + b.Reputation * 0.6f));
+                if (owner == null) continue;
+                var prop = State.GetProperty(b.PropertyId);
+                owner.NetWorth += (long)((b.Def.SetupCost + InvestedInUpgrades(b, prop) * 0.6f) * (0.3f + b.Reputation * 0.6f));
             }
         }
 
@@ -430,8 +427,8 @@ namespace CityBiz.Core
 
         public static long MarketWage(StaffRole role, float skill)
         {
-            float bonus = role == StaffRole.Cook || role == StaffRole.Analyst || role == StaffRole.Manager ? 45f : 0f;
-            return (long)Math.Round(75f + bonus + 150f * skill);
+            float bonus = role == StaffRole.Cook || role == StaffRole.Consultant || role == StaffRole.Manager ? 40f : 0f;
+            return (long)Math.Round(70f + bonus + 140f * skill);
         }
 
         EmployeeState CreateCandidate(StaffRole? role)
@@ -467,10 +464,10 @@ namespace CityBiz.Core
         public float TargetStock(BusinessState b)
         {
             var def = b.Def;
-            float dailyDemand = 0f;
-            foreach (float c in def.HourCurve) dailyDemand += c;
-            dailyDemand *= def.BaseHourlyDemand * 0.6f;
-            return Math.Max(dailyDemand, b.YesterdayCustomers * 1.3f) * 1.2f;
+            float curve = 0f;
+            foreach (float c in def.HourCurve) curve += c;
+            float dailyDemand = State.World.Malls.Count > 0 ? State.World.Malls[0].BaseVisitorsPerHour * def.VisitShare * curve * 0.12f : 50f;
+            return Math.Max(dailyDemand, b.YesterdayCustomers * 1.3f) * 1.2f * (1f + 0.1f * (b.Assortment - 1));
         }
 
         public float StockUnitCost(BusinessState b) => EconomyRules.StockUnitCost(State, b);
@@ -513,6 +510,5 @@ namespace CityBiz.Core
         }
 
         static float Clamp01(float v) => v < 0f ? 0f : v > 1f ? 1f : v;
-        static float Clamp(float v, float min, float max) => v < min ? min : v > max ? max : v;
     }
 }

@@ -27,8 +27,7 @@ namespace CityBiz.Core
                     case CommandType.RaiseWage: return RaiseWage(player, cmd.A, cmd.B, cmd.Amount);
                     case CommandType.OrderStock: return OrderStock(player, cmd.A, cmd.Amount);
                     case CommandType.SetAutoRestock: return SetAutoRestock(player, cmd.A, cmd.B != 0);
-                    case CommandType.UpgradeSecurity: return UpgradeSecurity(player, cmd.A);
-                    case CommandType.UpgradeInterior: return UpgradeInterior(player, cmd.A);
+                    case CommandType.UpgradeBusiness: return UpgradeBusiness(player, cmd.A, (UpgradeKind)cmd.B);
                     case CommandType.Repair: return Repair(player, cmd.A);
                     case CommandType.Sabotage: return Sabotage(player, cmd.A, (SabotageKind)cmd.B);
                     case CommandType.OfferPropertyToPlayer: return OfferProperty(player, cmd.A, cmd.B, cmd.Amount);
@@ -127,9 +126,9 @@ namespace CityBiz.Core
             var prop = State.GetProperty(propertyId);
             if (prop == null || prop.OwnerId != p.Id) return CommandResult.Fail("Это не ваша собственность");
             if (rent < 0 || rent > 1_000_000) return CommandResult.Fail("Некорректная ставка");
-            if (prop.Def.Kind != PropertyKind.Apartment && prop.TenantId != 0)
+            if (prop.TenantId != 0)
                 return CommandResult.Fail("Нельзя менять условия, пока действует договор аренды");
-            if (prop.Def.Kind != PropertyKind.Apartment && prop.BusinessId != 0)
+            if (prop.BusinessId != 0)
                 return CommandResult.Fail("В помещении работает ваш бизнес");
             prop.ForRent = rent > 0;
             if (rent > 0) prop.RentPrice = rent;
@@ -140,7 +139,6 @@ namespace CityBiz.Core
         {
             var prop = State.GetProperty(propertyId);
             if (prop == null) return CommandResult.Fail("Объект не найден");
-            if (prop.Def.Kind == PropertyKind.Apartment) return CommandResult.Fail("Квартиры сдаются только жильцам — их можно купить");
             if (prop.OwnerId == p.Id) return CommandResult.Fail("Это ваше помещение — открывайте бизнес без аренды");
             if (prop.TenantId != 0 || prop.BusinessId != 0 || !prop.ForRent) return CommandResult.Fail("Помещение не сдаётся");
             if (!TryPay(p, prop.RentPrice, out var fail)) return fail; // первый день оплачивается сразу
@@ -216,7 +214,7 @@ namespace CityBiz.Core
         {
             var b = OwnBusiness(p, businessId, out var fail);
             if (b == null) return fail;
-            if (b.Employees.Count >= b.Def.MaxStaff) return CommandResult.Fail("Штат укомплектован");
+            if (b.Employees.Count >= b.MaxStaff) return CommandResult.Fail("Штат укомплектован — улучшите оборудование, чтобы расширить штат");
             int idx = State.Candidates.FindIndex(c => c.Id == candidateId);
             if (idx < 0) return CommandResult.Fail("Кандидат уже нашёл работу");
             var e = State.Candidates[idx];
@@ -278,27 +276,29 @@ namespace CityBiz.Core
             return CommandResult.Ok(on ? "Автозакупка включена" : "Автозакупка выключена");
         }
 
-        CommandResult UpgradeSecurity(PlayerState p, int businessId)
+        CommandResult UpgradeBusiness(PlayerState p, int businessId, UpgradeKind kind)
         {
             var b = OwnBusiness(p, businessId, out var fail);
             if (b == null) return fail;
-            if (b.Security >= 3) return CommandResult.Fail("Максимальный уровень охраны");
-            long cost = EconomyCatalog.SecurityUpgradeCost * (b.Security + 1);
+            if ((int)kind >= EconomyCatalog.AllUpgrades.Length) return CommandResult.Fail("Неизвестное улучшение");
+            var u = EconomyCatalog.Upgrade(kind);
+            int level = b.GetLevel(kind);
+            if (level >= u.MaxLevel) return CommandResult.Fail($"«{u.Name}»: уже максимальный уровень");
+            var prop = State.GetProperty(b.PropertyId);
+            long cost = EconomyRules.UpgradeCost(u, level + 1, prop.Def);
             if (!TryPay(p, cost, out fail)) return fail;
-            b.Security++;
-            return CommandResult.Ok($"Охрана: уровень {b.Security}");
-        }
-
-        CommandResult UpgradeInterior(PlayerState p, int businessId)
-        {
-            var b = OwnBusiness(p, businessId, out var fail);
-            if (b == null) return fail;
-            if (b.Level >= 3) return CommandResult.Fail("Интерьер уже максимального уровня");
-            long cost = EconomyCatalog.InteriorUpgradeCost * b.Level;
-            if (!TryPay(p, cost, out fail)) return fail;
-            b.Level++;
+            b.SetLevel(kind, level + 1);
             b.TodayCosts += cost;
-            return CommandResult.Ok($"Интерьер улучшен до уровня {b.Level}");
+            if (kind == UpgradeKind.Equipment) b.EquipmentCondition = 1f;
+            string tail = "";
+            if (u.RenovationHours > 0)
+            {
+                // Ремонт закрывает точку на несколько игровых часов
+                b.ClosedUntilMinute = Math.Max(b.ClosedUntilMinute, State.Time.WholeMinutes + u.RenovationHours * 60);
+                tail = $" Точка закрыта на ремонт {u.RenovationHours} ч.";
+            }
+            Publish(NewsCategory.Business, $"«{b.Name}»: {u.Name.ToLowerInvariant()} — уровень {level + 1}.", b.PropertyId);
+            return CommandResult.Ok($"{u.Name}: уровень {level + 1} ({EconomyCatalog.Money(cost)}).{tail}");
         }
 
         public long RepairCost(PropertyState prop) => EconomyRules.RepairCost(State, prop);
@@ -315,7 +315,7 @@ namespace CityBiz.Core
             var b = State.GetBusiness(prop.BusinessId);
             if (b != null)
             {
-                b.Equipment = 1f;
+                b.EquipmentCondition = 1f;
                 if (b.OwnerId == p.Id) b.TodayCosts += cost;
             }
             return CommandResult.Ok($"Ремонт выполнен за {EconomyCatalog.Money(cost)}");
@@ -373,7 +373,7 @@ namespace CityBiz.Core
                     target.Reputation = Math.Max(0f, target.Reputation - 0.15f);
                     return "в сети появилась волна негативных отзывов.";
                 case SabotageKind.BreakEquipment:
-                    target.Equipment = Math.Max(0.1f, target.Equipment - 0.45f);
+                    target.EquipmentCondition = Math.Max(0.1f, target.EquipmentCondition - 0.45f);
                     return "сломалось оборудование, обслуживание замедлилось.";
                 case SabotageKind.PowerOutage:
                     target.ClosedUntilMinute = State.Time.WholeMinutes + 5 * 60;
@@ -386,7 +386,7 @@ namespace CityBiz.Core
                     ReturnToMarket(best);
                     return $"{best.Name} неожиданно уволился.";
                 case SabotageKind.TipOffInspection:
-                    float state = Math.Min(target.Equipment, prop != null ? prop.Condition : 1f);
+                    float state = Math.Min(target.EquipmentCondition, prop != null ? prop.Condition : 1f);
                     if (state >= 0.6f && Quality(target) >= 0.5f) return "прошла внеплановая проверка — нарушений нет.";
                     var owner = State.GetPlayer(target.OwnerId);
                     if (owner != null) owner.Cash -= 15_000;

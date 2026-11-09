@@ -19,8 +19,7 @@ namespace CityBiz.Core
         RaiseWage,            // A = businessId, B = employeeId, Amount = новая ставка
         OrderStock,           // A = businessId, Amount = единиц
         SetAutoRestock,       // A = businessId, B = 0/1
-        UpgradeSecurity,      // A = businessId
-        UpgradeInterior,      // A = businessId
+        UpgradeBusiness,      // A = businessId, B = UpgradeKind
         Repair,               // A = propertyId
         Sabotage,             // A = businessId цели, B = SabotageKind
         OfferPropertyToPlayer,// A = propertyId, B = покупатель, Amount = цена

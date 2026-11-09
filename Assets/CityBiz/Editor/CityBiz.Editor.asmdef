@@ -1,0 +1,19 @@
+{
+    "name": "CityBiz.Editor",
+    "rootNamespace": "CityBiz.EditorTools",
+    "references": [
+        "CityBiz.Core",
+        "CityBiz.Game"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

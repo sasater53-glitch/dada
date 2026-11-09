@@ -1,0 +1,21 @@
+<Project>
+  <!-- Проверка компиляции Unity-кода без редактора: dotnet build против управляемых сборок Unity.
+       Путь к распакованному редактору задаётся UNITY_EDITOR_DATA (папка Editor/Data). -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
+    <NoStdLib>true</NoStdLib>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <Nullable>disable</Nullable>
+    <NoWarn>CS0649;CS0414</NoWarn>
+    <UnityData Condition="'$(UNITY_EDITOR_DATA)' != ''">$(UNITY_EDITOR_DATA)</UnityData>
+    <UnityData Condition="'$(UnityData)' == ''">/tmp/unity/Editor/Data</UnityData>
+    <Repo>$(MSBuildThisFileDirectory)../..</Repo>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="$(UnityData)/NetStandard/ref/2.1.0/netstandard.dll" Private="false" />
+    <Reference Include="$(UnityData)/Managed/UnityEngine/UnityEngine*.dll" Private="false" />
+  </ItemGroup>
+</Project>

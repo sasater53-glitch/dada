@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Ядро без ссылок на движок — как asmdef CityBiz.Core (noEngineReferences). -->
+  <PropertyGroup>
+    <AssemblyName>CityBiz.Core</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(Repo)/Assets/CityBiz/Runtime/Core/**/*.cs" />
+    <Reference Remove="$(UnityData)/Managed/UnityEngine/UnityEngine*.dll" />
+  </ItemGroup>
+</Project>

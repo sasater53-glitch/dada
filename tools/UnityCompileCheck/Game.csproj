@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>CityBiz.Game</AssemblyName>
+    <DefineConstants>UNITY_6000_0_OR_NEWER;UNITY_6000_6_OR_NEWER;UNITY_2022_3_OR_NEWER;ENABLE_LEGACY_INPUT_MANAGER;$(ExtraDefines)</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(Repo)/Assets/CityBiz/Runtime/Game/**/*.cs" />
+    <ProjectReference Include="Core.csproj" />
+  </ItemGroup>
+</Project>

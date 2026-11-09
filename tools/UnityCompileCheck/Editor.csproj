@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>CityBiz.Editor</AssemblyName>
+    <DefineConstants>UNITY_EDITOR;UNITY_6000_0_OR_NEWER;UNITY_6000_6_OR_NEWER;UNITY_2022_3_OR_NEWER;ENABLE_LEGACY_INPUT_MANAGER</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(Repo)/Assets/CityBiz/Editor/**/*.cs" />
+    <ProjectReference Include="Game.csproj" />
+    <ProjectReference Include="Core.csproj" />
+    <Reference Include="$(UnityData)/Managed/UnityEngine/UnityEditor*.dll" Private="false" />
+  </ItemGroup>
+</Project>

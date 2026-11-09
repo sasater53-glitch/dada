@@ -1,0 +1,33 @@
+# Unity
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Mm]emoryCaptures/
+*.csproj
+!tools/**/*.csproj
+*.sln
+*.suo
+*.user
+*.pidb
+*.booproj
+.vs/
+.idea/
+*.apk
+*.aab
+*.unitypackage
+crashlytics-build.properties
+
+# Сгенерированные при запекании ассеты пересоздаются меню CityBiz → Запечь район
+/Assets/CityBiz/Generated/
+/Assets/CityBiz/Generated.meta
+
+# Инструменты проверки
+tools/**/bin/
+tools/**/obj/
+tools/**/TestResults/
+
+.hoplite/

@@ -5,7 +5,7 @@ using UnityEngine.InputSystem;
 
 namespace CityBiz.Game
 {
-    public enum GameKey { Interact, Portfolio, Map, Menu, Help, Debug, CameraMode, Chat, Jump, Sprint, Hire }
+    public enum GameKey { Interact, Portfolio, Map, Menu, Help, Debug, CameraMode, Chat, Jump, Sprint, Hire, Crouch }
 
     /// <summary>
     /// Единая точка ввода: работает и с новой Input System (шаблоны Unity 6), и со старым Input Manager.
@@ -27,6 +27,7 @@ namespace CityBiz.Game
                 case GameKey.Chat: return Key.Enter;
                 case GameKey.Jump: return Key.Space;
                 case GameKey.Hire: return Key.H;
+                case GameKey.Crouch: return Key.LeftCtrl;
                 default: return Key.LeftShift;
             }
         }
@@ -64,6 +65,7 @@ namespace CityBiz.Game
                 case GameKey.Chat: return KeyCode.Return;
                 case GameKey.Jump: return KeyCode.Space;
                 case GameKey.Hire: return KeyCode.H;
+                case GameKey.Crouch: return KeyCode.LeftControl;
                 default: return KeyCode.LeftShift;
             }
         }

@@ -28,7 +28,7 @@ namespace CityBiz.Game
             {
                 _checkTimer = 0.15f;
                 bool want = !Locked && Agents.AnyWithin(transform.position, 2.8f);
-                if (want && !_wantOpen && _open < 0.05f) CityAudio.Instance?.Chime(transform.position);
+                if (want && !_wantOpen && _open < 0.05f) MallAudio.Instance?.Chime(transform.position);
                 _wantOpen = want;
             }
             float target = _wantOpen ? 1f : 0f;

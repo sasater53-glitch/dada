@@ -222,4 +222,37 @@ namespace CityBiz.Game
             Transform = Matrix4x4.identity;
         }
     }
+
+    /// <summary>
+    /// Владелец сгенерированного меша: уничтожает меш вместе с объектом (пересборка интерьеров, выход из игры),
+    /// иначе каждая пересборка оставляла бы «осиротевший» Mesh в памяти. Меши-ассеты запечённой сцены не трогает.
+    /// </summary>
+    [DisallowMultipleComponent]
+    public sealed class GeneratedMesh : MonoBehaviour
+    {
+        [SerializeField] Mesh _mesh;
+
+        public static Mesh Assign(GameObject go, Mesh mesh)
+        {
+            var mf = go.GetComponent<MeshFilter>();
+            if (mf == null) mf = go.AddComponent<MeshFilter>();
+            var owner = go.GetComponent<GeneratedMesh>();
+            if (owner == null) owner = go.AddComponent<GeneratedMesh>();
+            else if (owner._mesh != null && owner._mesh != mesh) Release(owner._mesh);
+            mf.sharedMesh = mesh;
+            owner._mesh = mesh;
+            return mesh;
+        }
+
+        void OnDestroy() => Release(_mesh);
+
+        public static void Release(Mesh mesh)
+        {
+            if (mesh == null) return;
+#if UNITY_EDITOR
+            if (UnityEditor.EditorUtility.IsPersistent(mesh)) return;
+#endif
+            if (Application.isPlaying) Destroy(mesh); else DestroyImmediate(mesh);
+        }
+    }
 }

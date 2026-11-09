@@ -3,13 +3,13 @@ using System.Collections.Generic;
 using CityBiz.Core;
 using CityBiz.Core.Net;
 using UnityEngine;
-using UnityEngine.Rendering;
 
 namespace CityBiz.Game
 {
     /// <summary>
     /// Точка входа игры. Достаточно одного объекта с этим компонентом в сцене:
-    /// он строит (или находит запечённые) районы, поднимает окружение, NPC, транспорт, UI и сетевую сессию.
+    /// он строит (или находит запечённые) торговые центры, поднимает окружение, посетителей, звук, UI
+    /// и сетевую сессию (одиночная игра, сервер или подключение), затем ставит игрока от первого лица у входа.
     /// </summary>
     public sealed class CityGame : MonoBehaviour
     {
@@ -24,9 +24,9 @@ namespace CityBiz.Game
         public SimClient Client { get; private set; }
         public SimServer Server { get; private set; }
         public GameUI UI { get; private set; }
-        public TrafficSystem Traffic { get; private set; }
         public InstancedRenderer Instanced { get; private set; }
-        public DistrictInstance CurrentDistrict { get; private set; }
+        public IReadOnlyList<MallInstance> Malls => _malls;
+        public FirstPersonController Player => _player;
         public bool SessionStarted { get; private set; }
         public string SessionInfo { get; private set; } = "";
 
@@ -35,14 +35,28 @@ namespace CityBiz.Game
         public int LocalPlayerId => Client != null ? Client.LocalPlayerId : 0;
         public Vector3 ViewPosition => _camera != null ? _camera.transform.position : Vector3.zero;
 
+        /// <summary>ТЦ, в котором сейчас находится игрок (или первый).</summary>
+        public MallInstance CurrentMall
+        {
+            get
+            {
+                if (_malls.Count == 0) return null;
+                var pos = ViewPosition;
+                foreach (var m in _malls) if (m != null && m.Contains(pos)) return m;
+                return _malls[0];
+            }
+        }
+
         Camera _camera;
         Light _sun;
         LoopbackHub _hub;
         TcpServerTransport _tcpServer;
         TcpClientTransport _tcpClient;
-        PlayerController _player;
+        FirstPersonController _player;
+        PedestrianSystem _pedestrians;
         bool _worldSystemsStarted;
-        readonly List<DistrictInstance> _districts = new List<DistrictInstance>();
+        float _menuOrbit;
+        readonly List<MallInstance> _malls = new List<MallInstance>();
 
         void Awake()
         {
@@ -50,20 +64,26 @@ namespace CityBiz.Game
             Instance = this;
             Application.runInBackground = true;
             Application.targetFrameRate = -1;
+            // Статические кеши переживают Play Mode при выключенной перезагрузке домена — сбрасываем
             MaterialLibrary.Reset();
-            World = DistrictRegistry.CreateWorld();
+            AssetCatalog.Reset();
+            CharacterRig.ResetCache();
+            AudioLibrary.Reset();
+            World = MallRegistry.CreateWorld();
 
             SetupCameraAndLight();
-            BuildDistricts();
+            BuildMalls();
             SetupSystems();
-            if (_districts.Count > 0) PlaceCameraOverview(_districts[0]);
+            PlaceMenuCamera(0f);
         }
 
         void OnDestroy()
         {
-            if (Instance == this) Instance = null;
+            if (Instance != this) return;
+            Instance = null;
             _tcpServer?.Dispose();
             _tcpClient?.Dispose();
+            AssetCatalog.DestroyTemplates();
             MaterialLibrary.Reset();
         }
 
@@ -78,10 +98,11 @@ namespace CityBiz.Game
                 _camera = camGo.AddComponent<Camera>();
                 camGo.AddComponent<AudioListener>();
             }
-            _camera.nearClipPlane = 0.1f;
-            _camera.farClipPlane = 650f;
-            _camera.fieldOfView = 62f;
-            _camera.useOcclusionCulling = true; // работает при запечённой сцене (меню CityBiz → Запечь район)
+            else if (_camera.GetComponent<AudioListener>() == null) _camera.gameObject.AddComponent<AudioListener>();
+            _camera.nearClipPlane = 0.05f;
+            _camera.farClipPlane = 400f;
+            _camera.fieldOfView = 70f;
+            _camera.useOcclusionCulling = true; // работает в запечённой сцене (CityBiz → Запечь ТЦ)
             _camera.allowHDR = true;
             UrpBridge.ConfigureCamera(_camera);
 
@@ -100,38 +121,27 @@ namespace CityBiz.Game
             _sun.shadows = LightShadows.Soft;
             _sun.shadowBias = 0.04f;
 
-            // Разумные настройки производительности
-            QualitySettings.shadowDistance = Mathf.Min(QualitySettings.shadowDistance > 0 ? QualitySettings.shadowDistance : 90f, 110f);
+            // Внутри ТЦ тени нужны только вблизи (солнечные пятна под фонарём)
+            QualitySettings.shadowDistance = 70f;
             QualitySettings.lodBias = Mathf.Max(QualitySettings.lodBias, 1f);
         }
 
-        void BuildDistricts()
+        void BuildMalls()
         {
-            var builder = new DistrictBuilder(MaterialLibrary.Instance, World);
-            var worldRoot = new GameObject("City").transform;
-            // Запечённые районы ищем напрямую: порядок OnEnable/Awake между объектами сцены не гарантирован.
+            var builder = new MallBuilder(MaterialLibrary.Instance, World);
+            // Запечённые ТЦ ищем напрямую: порядок OnEnable/Awake между объектами сцены не гарантирован
 #if UNITY_6000_6_OR_NEWER
-            var baked = FindObjectsByType<DistrictInstance>();
+            var baked = FindObjectsByType<MallInstance>();
 #else
-            var baked = FindObjectsByType<DistrictInstance>(FindObjectsSortMode.None);
+            var baked = FindObjectsByType<MallInstance>(FindObjectsSortMode.None);
 #endif
-            foreach (var blueprint in DistrictRegistry.All)
-            {
-                DistrictInstance existing = null;
-                foreach (var d in baked) if (d.DistrictId == blueprint.DistrictId) existing = d;
-                if (existing != null)
-                {
-                    existing.AdoptMaterials(MaterialLibrary.Instance);
-                    _districts.Add(existing);
-                    continue;
-                }
-                var started = Time.realtimeSinceStartup;
-                var inst = builder.Build(blueprint, worldRoot);
-                Debug.Log($"[CityBiz] Район «{blueprint.DisplayName}» построен за {(Time.realtimeSinceStartup - started) * 1000f:0} мс");
-                _districts.Add(inst);
-            }
-            CurrentDistrict = _districts.Count > 0 ? _districts[0] : null;
-            if (CurrentDistrict != null) Instanced = CurrentDistrict.GetComponent<InstancedRenderer>();
+            Transform root = null;
+            foreach (var b in baked) if (b != null && b.transform.parent != null) { root = b.transform.parent; break; }
+            if (root == null) root = new GameObject("Malls").transform;
+            _malls.Clear();
+            _malls.AddRange(builder.BuildAll(root, baked));
+            if (_malls.Count > 0 && _malls[0] != null) Instanced = _malls[0].GetComponent<InstancedRenderer>();
+            if (_malls.Count == 0) Debug.LogError("[CityBiz] В MallRegistry нет ни одного ТЦ.");
         }
 
         void SetupSystems()
@@ -146,21 +156,24 @@ namespace CityBiz.Game
             }
 
             var post = UrpBridge.CreateGlobalVolume(systems);
-            Add<DayNightCycle>("DayNight").Init(_sun, post);
-            Add<WeatherController>("Weather").Init(_sun);
-            Add<LightBudget>("LightBudget").Init(_districts);
-            Traffic = Add<TrafficSystem>("Traffic");
-            Add<CityAudio>("Audio").Init(Traffic);
-            Add<PedestrianSystem>("Pedestrians");
+            Add<WeatherController>("Weather").Init(_malls);
+            Add<DayNightCycle>("DayNight").Init(_sun, post, _malls);
+            Add<LightBudget>("LightBudget").Init(_malls);
+            Add<MallAudio>("Audio").Init(_malls);
+            _pedestrians = Add<PedestrianSystem>("Shoppers");
             UI = Add<GameUI>("UI");
         }
 
-        void PlaceCameraOverview(DistrictInstance d)
+        /// <summary>Пока открыто главное меню — медленный облёт атриума.</summary>
+        void PlaceMenuCamera(float t)
         {
-            // Пока открыто главное меню — панорама района
-            var target = d.transform.TransformPoint(new Vector3(0, 0, 0));
-            _camera.transform.position = target + new Vector3(-70f, 38f, -55f);
-            _camera.transform.LookAt(target + new Vector3(10f, 0, 10f));
+            var mall = _malls.Count > 0 ? _malls[0] : null;
+            if (mall == null || _camera == null) return;
+            var b = mall.Bounds;
+            float x = Mathf.Lerp(b.xMax - 12f, b.center.x + 10f, Mathf.PingPong(t * 0.01f, 1f));
+            var pos = mall.transform.TransformPoint(new Vector3(x, 8.5f, Mathf.Sin(t * 0.05f) * 3f));
+            var look = mall.transform.TransformPoint(new Vector3(x - 30f, 4f, 0f));
+            _camera.transform.SetPositionAndRotation(pos, Quaternion.LookRotation(look - pos));
         }
 
         // ---------------- Сессии ----------------
@@ -181,6 +194,7 @@ namespace CityBiz.Game
 
         public void StartSolo(string playerName)
         {
+            if (SessionStarted) return;
             _hub = new LoopbackHub();
             Server = new SimServer(CreateSimulation(), _hub);
             AttachClient(new SimClient(World, _hub.CreateClient(), playerName, ColorFromName(playerName)));
@@ -189,6 +203,7 @@ namespace CityBiz.Game
 
         public void StartHost(string playerName, int port)
         {
+            if (SessionStarted) return;
             try
             {
                 _hub = new LoopbackHub();
@@ -204,11 +219,13 @@ namespace CityBiz.Game
                 _tcpServer?.Dispose();
                 _tcpServer = null;
                 Server = null;
+                _hub = null;
             }
         }
 
         public void Join(string playerName, string host, int port)
         {
+            if (SessionStarted) return;
             _tcpClient = new TcpClientTransport(host, port);
             AttachClient(new SimClient(World, _tcpClient, playerName, ColorFromName(playerName)));
             SessionInfo = $"Подключение к {host}:{port}…";
@@ -227,20 +244,22 @@ namespace CityBiz.Game
             if (Client == null) return;
             Client.Send(cmd, r =>
             {
-                if (!string.IsNullOrEmpty(r.Message) && cmd.Type != CommandType.Chat) UI?.Toast(r.Message, r.Success);
+                if (cmd.Type == CommandType.Chat) return;
+                if (!string.IsNullOrEmpty(r.Message)) UI?.Toast(r.Message, r.Success);
+                MallAudio.Instance?.Ui(r.Success ? (cmd.Type == CommandType.UpgradeBusiness ? UiSound.Coins : UiSound.Confirm) : UiSound.Error);
             });
         }
 
         void OnNews(NewsItem n)
         {
-            if (UI == null || State == null) return;
+            if (UI == null || State == null || Client == null) return;
             // Важные события для игрока выводятся всплывающими уведомлениями
             var prop = State.GetProperty(n.PropertyId);
             bool mine = prop != null && (prop.OwnerId == LocalPlayerId || prop.TenantId == LocalPlayerId);
             if (mine && (n.Category == NewsCategory.Sabotage || n.Category == NewsCategory.Police || n.Category == NewsCategory.Business || n.Category == NewsCategory.Property))
                 UI.Toast(n.Text, n.Category != NewsCategory.Sabotage);
             var me = Client.LocalPlayer;
-            if (me != null && n.Category == NewsCategory.Property && n.Text.Contains("предлагает " + me.Name))
+            if (me != null && n.Category == NewsCategory.Property && n.Text != null && n.Text.Contains("предлагает " + me.Name))
                 UI.Toast("Вам предложили сделку — откройте Портфель → Сделки", true);
         }
 
@@ -262,11 +281,16 @@ namespace CityBiz.Game
             Server?.Update(dt);
             Client?.Update(dt);
 
-            if (Ready && !_worldSystemsStarted && CurrentDistrict != null)
+            if (!_worldSystemsStarted)
+            {
+                _menuOrbit += dt;
+                if (!Ready) PlaceMenuCamera(_menuOrbit);
+            }
+
+            if (Ready && !_worldSystemsStarted && _malls.Count > 0)
             {
                 _worldSystemsStarted = true;
-                Traffic.Init(CurrentDistrict);
-                GetComponentInChildren<PedestrianSystem>().Init(CurrentDistrict);
+                if (_pedestrians != null) _pedestrians.Init(_malls);
                 SpawnPlayer();
                 var remote = new GameObject("RemotePlayers").AddComponent<RemotePlayers>();
                 remote.transform.SetParent(transform, false);
@@ -276,15 +300,13 @@ namespace CityBiz.Game
 
         void SpawnPlayer()
         {
-            var d = CurrentDistrict;
+            var mall = _malls[0];
             var go = new GameObject("Player");
-            _player = go.AddComponent<PlayerController>();
-            var me = Client.LocalPlayer;
-            var color = me != null ? RemotePlayers.ColorFrom(me.Color) : new Color(0.2f, 0.5f, 0.9f);
-            // Игроки по сети появляются чуть в стороне друг от друга
-            var offset = new Vector3((LocalPlayerId % 5) * 1.2f, 0, 0);
-            _player.Init(_camera, d.transform.TransformPoint(d.PlayerSpawn) + offset, d.PlayerSpawnYaw, color);
-            UI.Toast("Добро пожаловать на Липовую улицу! F1 — справка, M — карта.", true);
+            _player = go.AddComponent<FirstPersonController>();
+            // Игроки по сети появляются чуть в стороне друг от друга (поперёк галереи)
+            var offset = mall.transform.rotation * new Vector3(0f, 0f, ((LocalPlayerId % 5) - 2) * 0.9f);
+            _player.Init(_camera, mall.transform.TransformPoint(mall.PlayerSpawn) + offset, mall.PlayerSpawnYaw + mall.transform.eulerAngles.y);
+            UI.Toast($"Добро пожаловать в {mall.DisplayName}! Найдите свободное помещение и развивайте бизнес. F1 — справка, M — схема ТЦ.", true);
         }
     }
 }

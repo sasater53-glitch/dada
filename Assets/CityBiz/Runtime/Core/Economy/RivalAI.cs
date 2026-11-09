@@ -4,7 +4,8 @@ using System.Collections.Generic;
 namespace CityBiz.Core
 {
     /// <summary>
-    /// ИИ-конкурент. Действует только через CitySimulation.Execute — по тем же правилам, что и живые игроки.
+    /// ИИ-конкурент. Действует только через CitySimulation.Execute — по тем же правилам, что и живые игроки:
+    /// нанимает персонал, двигает цены, развивает свои точки, открывает новые и вредит лидерам.
     /// </summary>
     public sealed class RivalAI
     {
@@ -22,20 +23,24 @@ namespace CityBiz.Core
             var me = sim.State.GetPlayer(_profile.PlayerId);
             if (me == null) return;
             if (hour == 8) ManageBusinesses(sim, me);
-            if (hour == 10 && _profile.Expansion > 0f && me.Cash > 160_000 && _rng.Chance(_profile.Expansion * 0.3f)) Expand(sim, me);
-            if (hour == 15 && _profile.Expansion > 0f && me.Cash > 400_000 && _rng.Chance(0.15f)) BuyRentedPremises(sim, me);
+            if (hour == 9 && _profile.UpgradeDrive > 0f) Develop(sim, me);
+            if (hour == 10 && _profile.Expansion > 0f && me.Cash > 150_000 && _rng.Chance(_profile.Expansion * 0.25f)) Expand(sim, me);
             if (hour == 21 && _profile.Aggression > 0f && _rng.Chance(_profile.Aggression * 0.3f)) TrySabotage(sim, me);
+        }
+
+        List<BusinessState> Mine(CitySimulation sim, PlayerState me)
+        {
+            var mine = new List<BusinessState>();
+            foreach (var b in sim.State.Businesses.Values) if (b.OwnerId == me.Id) mine.Add(b);
+            return mine;
         }
 
         void ManageBusinesses(CitySimulation sim, PlayerState me)
         {
-            var mine = new List<BusinessState>();
-            foreach (var b in sim.State.Businesses.Values) if (b.OwnerId == me.Id) mine.Add(b);
-
-            foreach (var b in mine)
+            foreach (var b in Mine(sim, me))
             {
                 var def = b.Def;
-                int desired = Math.Min(def.MaxStaff, def.MinStaff + (b.YesterdayCustomers > 200 ? 2 : 1));
+                int desired = Math.Min(b.MaxStaff, def.MinStaff + (b.YesterdayCustomers > 150 ? 2 : 1));
                 while (b.Employees.Count < desired)
                 {
                     var c = BestCandidate(sim, def);
@@ -46,8 +51,9 @@ namespace CityBiz.Core
                     if (e.Morale < 0.35f)
                         sim.Execute(me.Id, Command.Make(CommandType.RaiseWage, b.Id, e.Id, (long)(e.Wage * 1.15f)));
 
-                // Цена: держимся около средней цены чужих конкурентов с поправкой на стиль игрока.
-                float avg = 1f; int n = 0; float sum = 0f;
+                // Цена: около средней цены чужих конкурентов с поправкой на стиль
+                float avg = 1f, sum = 0f;
+                int n = 0;
                 foreach (var other in sim.State.Businesses.Values)
                     if (other.Type == b.Type && other.OwnerId != me.Id) { sum += other.PriceLevel; n++; }
                 if (n > 0) avg = sum / n;
@@ -56,15 +62,32 @@ namespace CityBiz.Core
                 sim.Execute(me.Id, Command.Make(CommandType.SetPrice, b.Id, f: b.PriceLevel + (target - b.PriceLevel) * 0.5f));
 
                 var prop = sim.State.GetProperty(b.PropertyId);
-                if ((b.Equipment < 0.6f || prop.Condition < 0.5f) && me.Cash > sim.RepairCost(prop) * 3)
+                if ((b.EquipmentCondition < 0.6f || prop.Condition < 0.5f) && me.Cash > sim.RepairCost(prop) * 3)
                     sim.Execute(me.Id, Command.Make(CommandType.Repair, prop.Id));
-                if (b.Security < 2 && b.YesterdayProfit > 2_500 && me.Cash > 60_000 && _rng.Chance(0.25))
-                    sim.Execute(me.Id, Command.Make(CommandType.UpgradeSecurity, b.Id));
-                if (b.Level < 3 && b.YesterdayProfit > 4_000 && me.Cash > 120_000 && _rng.Chance(0.2))
-                    sim.Execute(me.Id, Command.Make(CommandType.UpgradeInterior, b.Id));
-                if (b.YesterdayProfit < -6_000 && b.Reputation < 0.25f && _rng.Chance(0.3))
+                if (b.YesterdayProfit < -5_000 && b.Reputation < 0.25f && _rng.Chance(0.3))
                     sim.Execute(me.Id, Command.Make(CommandType.CloseBusiness, b.Id));
             }
+        }
+
+        /// <summary>Вкладывает часть свободных денег в самое выгодное улучшение самой прибыльной точки.</summary>
+        void Develop(CitySimulation sim, PlayerState me)
+        {
+            if (!_rng.Chance(_profile.UpgradeDrive * 0.5f)) return;
+            BusinessState best = null;
+            foreach (var b in Mine(sim, me))
+                if (best == null || b.YesterdayProfit > best.YesterdayProfit) best = b;
+            if (best == null || best.YesterdayProfit <= 0) return;
+            var prop = sim.State.GetProperty(best.PropertyId);
+            UpgradeKind? choice = null;
+            long cheapest = long.MaxValue;
+            foreach (var u in EconomyCatalog.AllUpgrades)
+            {
+                if (u.Kind == UpgradeKind.Security && best.Security >= 1 && _profile.Aggression < 0.5f) continue;
+                long cost = EconomyRules.NextUpgradeCost(best, prop, u.Kind);
+                if (cost > 0 && cost < cheapest) { cheapest = cost; choice = u.Kind; }
+            }
+            if (choice != null && me.Cash > cheapest * 4)
+                sim.Execute(me.Id, Command.Make(CommandType.UpgradeBusiness, best.Id, (int)choice.Value));
         }
 
         static EmployeeState BestCandidate(CitySimulation sim, BusinessTypeDef def)
@@ -86,14 +109,14 @@ namespace CityBiz.Core
             float bestScore = float.MinValue;
             foreach (var prop in sim.State.Properties.Values)
             {
-                if (prop.TenantId != 0 || prop.BusinessId != 0 || !prop.ForRent || prop.OwnerId == me.Id) continue;
-                if (prop.Def.Kind == PropertyKind.Apartment || prop.Def.Kind == PropertyKind.Parking) continue;
+                if (!EconomyRules.CanRent(me.Id, prop)) continue;
                 foreach (var def in EconomyCatalog.All)
                 {
                     if (!def.Allows(prop.Def.Kind) || def.SetupCost + prop.RentPrice * 5 > me.Cash * 0.6f) continue;
                     int competitors = 0;
                     foreach (var b in sim.State.Businesses.Values) if (b.Type == def.Type) competitors++;
-                    float score = prop.Def.FootTraffic - competitors * 0.6f + _rng.Range(0f, 0.5f) - prop.RentPrice / 4000f;
+                    float preferred = Array.IndexOf(_profile.Preferred, def.Type) >= 0 ? 1.5f : 0f;
+                    float score = prop.Def.FootTraffic + preferred - competitors * 0.35f + _rng.Range(0f, 0.5f) - prop.RentPrice / 4000f;
                     if (score > bestScore) { bestScore = score; bestProp = prop; bestType = def.Type; }
                 }
             }
@@ -101,19 +124,6 @@ namespace CityBiz.Core
             if (!sim.Execute(me.Id, Command.Make(CommandType.RentProperty, bestProp.Id)).Success) return;
             if (!sim.Execute(me.Id, Command.Make(CommandType.OpenBusiness, bestProp.Id, (int)bestType)).Success)
                 sim.Execute(me.Id, Command.Make(CommandType.EndLease, bestProp.Id));
-        }
-
-        void BuyRentedPremises(CitySimulation sim, PlayerState me)
-        {
-            foreach (var prop in sim.State.Properties.Values)
-            {
-                if (prop.TenantId != me.Id || !sim.CanBuy(me.Id, prop)) continue;
-                if (sim.PurchasePrice(prop) < me.Cash * 0.5f)
-                {
-                    sim.Execute(me.Id, Command.Make(CommandType.BuyProperty, prop.Id));
-                    return;
-                }
-            }
         }
 
         void TrySabotage(CitySimulation sim, PlayerState me)
